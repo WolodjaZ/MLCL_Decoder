@@ -5,6 +5,57 @@ from torch import nn, Tensor
 from torch.nn.modules.transformer import _get_activation_fn
 
 
+def add_ml_supcon_head(model, head='mlp', feat_dim=128):
+    num_features = model.num_features
+    if hasattr(model, 'fc'):  # resnet50
+        del model.fc
+        if head == 'linear':
+            model.fc = nn.Linear(num_features, feat_dim)
+        elif head == 'mlp':
+            model.fc = nn.Sequential(
+                nn.Linear(num_features, num_features),
+                nn.ReLU(inplace=True),
+                nn.Linear(num_features, feat_dim)
+            )
+        else:
+            raise NotImplementedError(
+                'head not supported: {}'.format(head))
+
+    elif hasattr(model, 'head'):  # tresnet
+        del model.head
+        if head == 'linear':
+            model.head = nn.Linear(num_features, feat_dim)
+        elif head == 'mlp':
+            model.head = nn.Sequential(
+                nn.Linear(num_features, num_features),
+                nn.ReLU(inplace=True),
+                nn.Linear(num_features, feat_dim)
+            )
+        else:
+            raise NotImplementedError(
+                'head not supported: {}'.format(head))
+    else:
+        print("model is not suited for ml-supcon")
+        exit(-1)
+
+    return model
+
+def add_valid_linear_classification(model, num_classes=-1):
+    if num_classes == -1:
+        num_classes = model.num_classes
+    num_features = model.num_features
+    if hasattr(model, 'fc'):  # resnet50
+        del model.fc
+        model.fc = nn.Linear(num_features, num_classes)
+    elif hasattr(model, 'head'):  # tresnet
+        del model.head
+        model.head = nn.Linear(num_features, num_classes)
+    else:
+        print("model is not suited for ml-supcon")
+        exit(-1)
+
+    return model
+
 def add_ml_decoder_head(model, num_classes=-1, num_of_groups=-1, decoder_embedding=768, zsl=0):
     if num_classes == -1:
         num_classes = model.num_classes

@@ -52,3 +52,41 @@ def create_model(args,load_head=False):
             model.load_state_dict(state['model'], strict=True)
 
     return model
+
+
+def create_model_base(args, load_head=False):
+    """Create a base model
+    """
+    model_params = {'args': args, 'num_classes': args.num_classes}
+    args = model_params['args']
+    args.model_name = args.model_name.lower()
+
+    if args.model_name == 'tresnet_m':
+        model = TResnetM(model_params)
+    elif args.model_name == 'tresnet_l':
+        model = TResnetL(model_params)
+    elif args.model_name == 'tresnet_xl':
+        model = TResnetXL(model_params)
+    else:
+        print("model: {} not found !!".format(args.model_name))
+        exit(-1)
+
+    # loading pretrain model
+    model_path = args.model_path
+    if args.model_name == 'tresnet_l' and os.path.exists("./tresnet_l.pth"):
+        model_path = "./tresnet_l.pth"
+    if model_path:  # make sure to load pretrained model
+        if not os.path.exists(model_path):
+            print("downloading pretrain model...")
+            request.urlretrieve(args.model_path, "./tresnet_l.pth")
+            model_path = "./tresnet_l.pth"
+            print('done')
+        state = torch.load(model_path, map_location='cpu')
+        if not load_head:
+            filtered_dict = {k: v for k, v in state['model'].items() if
+                             (k in model.state_dict() and 'head.fc' not in k)}
+            model.load_state_dict(filtered_dict, strict=False)
+        else:
+            model.load_state_dict(state['model'], strict=True)
+
+    return model

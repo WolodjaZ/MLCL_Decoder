@@ -1,20 +1,19 @@
 import os
 from copy import deepcopy
 import random
-import time
-from copy import deepcopy
+import math
+import numpy as np
+import torch
+import torch.optim as optim
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 from torchvision import datasets as datasets
-import torch
-from PIL import ImageDraw
 from pycocotools.coco import COCO
 import json
 import torch.utils.data as data
 from sklearn.preprocessing import MultiLabelBinarizer
 import pandas as pd
-
 
 
 def parse_args(parser):
@@ -352,3 +351,37 @@ def get_datasets_from_csv(dataset_local_path, metadata_local_path, train_transfo
                              transform=val_transform, class_ids=test_cls_ids)
 
     return train_dl, val_dl, train_cls_ids, test_cls_ids
+
+
+
+class TwoCropTransform:
+    """Create two crops of the same image"""
+    def __init__(self, transform):
+        self.transform = transform
+
+    def __call__(self, x):
+        return [self.transform(x), self.transform(x)]
+
+def adjust_learning_rate(args, optimizer, epoch):
+    lr = args.learning_rate_con
+    if args.cosine:
+        eta_min = lr * (args.lr_decay_rate ** 3)
+        lr = eta_min + (lr - eta_min) * (
+                1 + math.cos(math.pi * epoch / args.epochs_con)) / 2
+    else:
+        steps = np.sum(epoch > np.asarray(args.lr_decay_epochs))
+        if steps > 0:
+            lr = lr * (args.lr_decay_rate ** steps)
+
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+
+
+def warmup_learning_rate(args, epoch, batch_id, total_batches, optimizer):
+    if args.warm and epoch <= args.warm_epochs:
+        p = (batch_id + (epoch - 1) * total_batches) / \
+            (args.warm_epochs * total_batches)
+        lr = args.warmup_from + p * (args.warmup_to - args.warmup_from)
+
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
