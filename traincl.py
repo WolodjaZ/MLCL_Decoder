@@ -1,6 +1,7 @@
 import os
 import argparse
 
+import shutil
 import umap
 import math
 import wandb
@@ -9,6 +10,7 @@ import torch.nn.parallel
 import torch.optim
 import plotly.graph_objects as go
 import torch.utils.data.distributed
+from sklearn.metrics import roc_auc_score
 import torchvision.transforms as transforms
 from torch.optim import lr_scheduler
 from src_files.helper_functions.helper_functions import mAP, CocoDetection, CutoutPIL, ModelEma, \
@@ -57,7 +59,7 @@ def parse_option():
     parser.add_argument('--num-of-groups', default=-1, type=int)
     parser.add_argument('--decoder-embedding', default=768, type=int)
     parser.add_argument('--zsl', default=0, type=int)
-    parser.add_argument('--threshold_multi', default=0.3, type=float) 
+    parser.add_argument('--threshold_multi', default=0.4, type=float)
 
     # MultiSupCon
     parser.add_argument('--batch-size_con', default=256, type=int,
@@ -74,8 +76,8 @@ def parse_option():
                         help='weight decay')
     parser.add_argument('--momentum', type=float, default=0.9,
                         help='momentum')
-    parser.add_argument('--method', type=str, default='SupCon',
-                        choices=['SupCon', 'SimCLR'], help='choose method')
+    parser.add_argument('--method', type=str, default='MultiSupCon',
+                        choices=['MultiSupCon', 'SupCon', 'SimCLR'], help='choose method')
     parser.add_argument('--temp', type=float, default=0.07,
                         help='temperature for loss function')
     parser.add_argument('--cosine', action='store_true',
@@ -84,6 +86,9 @@ def parse_option():
                         help='warm-up for large batch training')
     parser.add_argument('--feat-dim-con', type=int, default=128,
                         help='feature dimension for contrastive learning')
+    parser.add_argument('--c_treshold', type=float, default=0.3,
+                        help='Jaccard sim split parameter')
+    
     return parser
 
 def main():
@@ -94,7 +99,8 @@ def main():
     model = create_model_base(args).cuda()
 
     print('done')
-
+    
+    wandb.login()
     # COCO Data loading
     instances_path_val = os.path.join(args.data, 'annotations/instances_val2014.json')
     instances_path_train = os.path.join(args.data, 'annotations/instances_train2014.json')
@@ -145,6 +151,8 @@ def main():
     print("ML_decode len(train_dataset)): ", len(train_dataset))
     
     experiemnt_dir = os.path.join(args.save_dir, f"experiment_{args.run}")
+    if os.path.exists(experiemnt_dir):
+        shutil.rmtree(experiemnt_dir)
     os.makedirs(experiemnt_dir, exist_ok=False)
     os.makedirs(os.path.join(experiemnt_dir, "models"), exist_ok=False)
 
@@ -170,11 +178,10 @@ def main():
     model = add_ml_supcon_head(model, feat_dim=args.feat_dim_con)
     train_multi_label_coco_backbone(model, train_backbone_loader, val_backbone_loader,  args)
     if args.freeze:
-        model.body.weight.requires_grad = False
-        model.body.bias.requires_grad = False
-        model.global_pool.weight.requires_grad = False
-        model.global_pool.bias.requires_grad = False
-        
+        for name, p in model.named_parameters():
+            if "body" in name or "global_pool" in name:
+                p.requires_grad = False
+
     print("Training head")
     model = add_ml_decoder_head(model,num_classes=args.num_classes,num_of_groups=args.num_of_groups,
                                 decoder_embedding=args.decoder_embedding, zsl=args.zsl)
@@ -182,6 +189,8 @@ def main():
 
 
 def train_multi_label_coco_backbone(model, train_loader, val_loader,  args):
+    if torch.cuda.is_available():
+        model = model.cuda()
     ema = ModelEma(model, 0.9997)  # 0.9997^641=0.82
     
     # set optimizer
@@ -222,6 +231,7 @@ def train_multi_label_coco_backbone(model, train_loader, val_loader,  args):
             "cosine": args.cosine,
             "warm": args.warm,
             "feat-dim-con": args.feat_dim_con,
+            "c_treshold": args.c_treshold
       })
     wandb.watch(model, log="all")
     
@@ -234,6 +244,7 @@ def train_multi_label_coco_backbone(model, train_loader, val_loader,  args):
             if torch.cuda.is_available():
                 images = images.cuda(non_blocking=True)
                 labels = labels.cuda(non_blocking=True)
+            labels = labels.max(dim=1)[0]
             bsz = labels.shape[0]
 
             # warm-up learning rate
@@ -266,14 +277,13 @@ def train_multi_label_coco_backbone(model, train_loader, val_loader,  args):
             # print info
             if idx % 100 == 0:
                 print(f'Train: Epoch [{epoch-1}/{args.epochs_con}], Step [{idx}/{len(train_loader)}] loss: {loss.item():.3f}')
-
         try:
             torch.save(model.state_dict(), os.path.join(
                 *[args.save_dir, f"experiment_{args.run}", "models", "model-backbone-{}-{}.ckpt".format(epoch + 1, idx + 1)]))
         except:
             pass
     
-        fig, fig_ema = validate_contrastive(model, train_loader, args.num_classes, args.vis_3d)
+        fig, fig_ema = validate_contrastive(model, ema, train_loader, args.num_classes, args.vis_3d)
         
         #log
         wandb.log({
@@ -284,7 +294,7 @@ def train_multi_label_coco_backbone(model, train_loader, val_loader,  args):
         })
     
     if args.linear:
-        loss_linear = train_contrastive_linear(model, ema, train_loader,  args)
+        loss_linear, ema = train_contrastive_linear(model, train_loader,  args)
         mAP_regular, mAP_ema = validate_contrastive_linear(model, ema, val_loader,  args)
         wandb.run.summary["loss_linear"] = loss_linear
         wandb.run.summary["mAP_score"] = mAP_regular
@@ -307,10 +317,10 @@ def validate_contrastive(model, ema_model, train_loader, numb_classes, vis_3d=Tr
                 images = images.cuda(non_blocking=True)
 
             # compute loss
-            outputs.appends(torch.nn.functional.normalize(model(images), dim=1).cpu().detach())
-            outputs_ema.appends(torch.nn.functional.normalize(ema_model(images), dim=1).cpu().detach())
-            labels.append(label.cpu().detach())
-
+            outputs.append(torch.nn.functional.normalize(model(images), dim=1).cpu().detach())
+            outputs_ema.append(torch.nn.functional.normalize(ema_model.module(images), dim=1).cpu().detach())
+            labels.append(label.max(dim=1)[0].cpu().detach())
+    
     embedding = reducer.fit_transform(torch.cat(outputs).numpy())
     embedding_ema = reducer.fit_transform(torch.cat(outputs_ema).numpy())
     labels = torch.cat(labels).numpy()
@@ -371,15 +381,17 @@ def validate_contrastive(model, ema_model, train_loader, numb_classes, vis_3d=Tr
 
     return fig, fig_ema
 
-def train_contrastive_linear(model, ema_model, train_loader, args):
+def train_contrastive_linear(model, train_loader, args):
     model = add_valid_linear_classification(model, args.num_classes)
+    if torch.cuda.is_available():
+        model = model.cuda()
     
-    model.body.weight.requires_grad = False
-    model.body.bias.requires_grad = False
-    model.global_pool.weight.requires_grad = False
-    model.global_pool.bias.requires_grad = False
+    ema_model = ModelEma(model, 0.9997)  # 0.9997^641=0.82
+    for name, p in model.named_parameters():
+        if "body" in name or "global_pool" in name:
+            p.requires_grad = False
     
-    criterion = torch.nn.CrossEntropyLoss()
+    criterion = AsymmetricLoss(gamma_neg=4, gamma_pos=0, clip=0.05, disable_torch_grad_focal_loss=True) #torch.nn.BCEWithLogitsLoss()
     optimizer = torch.optim.Adam(params=model.parameters())
     
     for epoch in range(10):
@@ -391,8 +403,8 @@ def train_contrastive_linear(model, ema_model, train_loader, args):
             labels = labels.cuda()
             labels = labels.max(dim=1)[0]
             with autocast():  # mixed precision
-                output = model(images).float()  # sigmoid will be done in loss !
-            loss = criterion(output, labels)
+                output = model(images)  # sigmoid will be done in loss !
+            loss = criterion(output.float(), labels)
             loss_total += loss.item()
             model.zero_grad()
             loss.backward()
@@ -402,14 +414,13 @@ def train_contrastive_linear(model, ema_model, train_loader, args):
             # print info
             if idx % 100 == 0:
                 print(f'Linear Train: Epoch [{epoch}/{args.epochs}], Step [{idx}/{len(train_loader)}], Loss: {loss.item():.1f}')
-        
+            
         loss_total /= len(train_loader)
     
-    model.body.weight.requires_grad = True
-    model.body.bias.requires_grad = True
-    model.global_pool.weight.requires_grad = True
-    model.global_pool.bias.requires_grad = True
-    return loss_total
+    for name, p in model.named_parameters():
+        if "body" in name or "global_pool" in name:
+            p.requires_grad = True
+    return loss_total, ema_model
 
 def validate_contrastive_linear(model, ema_model, val_loader, args):
     model.eval()
@@ -424,15 +435,19 @@ def validate_contrastive_linear(model, ema_model, val_loader, args):
                 images = images.cuda(non_blocking=True)
 
             # compute loss
-            outputs.appends(Sig(model(images)).cpu().detach())
-            outputs_ema.appends(Sig(ema_model(images)).cpu().detach())
-
+            outputs.append(Sig(model(images)).cpu().detach())
+            outputs_ema.append(Sig(ema_model.module(images)).cpu().detach())
+            labels.append(label.max(dim=1)[0].cpu().detach())
+            
     mAP_score_regular = mAP(torch.cat(labels).numpy(), torch.cat(outputs).numpy())
     mAP_score_ema = mAP(torch.cat(labels).numpy(), torch.cat(outputs_ema).numpy())
     print("mAP score regular {:.2f}, mAP score EMA {:.2f}".format(mAP_score_regular, mAP_score_ema))
     return mAP_score_regular, mAP_score_ema
 
-def train_multi_label_coco(model, train_loader, augument_train, val_loader, args):
+def train_multi_label_coco(model, train_loader, val_loader, args):
+    if torch.cuda.is_available():
+        model = model.cuda()
+
     ema = ModelEma(model, 0.9997)  # 0.9997^641=0.82
 
     # set optimizer
@@ -489,7 +504,7 @@ def train_multi_label_coco(model, train_loader, augument_train, val_loader, args
             # print info
             if idx % 100 == 0:
                 print(f'Train: Epoch [{epoch}/{args.epochs}], Step [{idx}/{len(train_loader)}], LR {scheduler.get_last_lr()[0]:.1e}, Loss: {loss.item():.1f}')
-
+            
         try:
             torch.save(model.state_dict(), os.path.join(
                 *[args.save_dir, f"experiment_{args.run}", "models", "model-{}-{}.ckpt".format(epoch + 1, idx + 1)]))
@@ -497,7 +512,7 @@ def train_multi_label_coco(model, train_loader, augument_train, val_loader, args
             pass
 
         model.eval()
-        mAP_score_regular, mAP_score_ema = validate_multi(val_loader, model, ema, args.batch_imgs, args.threshold_multi)
+        mAP_score_regular, mAP_score_ema = validate_multi(val_loader, model, ema, args.num_classes, args.batch_imgs, args.threshold_multi)
         mAP_score = max(mAP_score_regular, mAP_score_ema)
         
         #log
@@ -520,7 +535,7 @@ def train_multi_label_coco(model, train_loader, augument_train, val_loader, args
     wandb.run.summary["highest_mAP"] = highest_mAP
     wandb.finish()
 
-def validate_multi(val_loader, model, ema_model, batch_idx=0, threshold_multi=0.4):
+def validate_multi(val_loader, model, ema_model, numb_classes, batch_idx=0, threshold_multi=0.4):
     print("starting validation")
     Sig = torch.nn.Sigmoid()
     preds_regular = []
@@ -541,20 +556,30 @@ def validate_multi(val_loader, model, ema_model, batch_idx=0, threshold_multi=0.
         targets.append(labels.cpu().detach())
         
         if idx == batch_idx:
-            table = wandb.Table(columns=["image", "pred", "preds_ema", "target"])
-            for img, pred, pred_ema, targ in zip(images.to("cpu"), output_regular.to("cpu"), output_ema.to("cpu"), labels.to("cpu")):
-                pred_index = pred <= threshold_multi
-                pred_index = pred_index.nonzero().reshape(-1)
-                pred_ema_index = pred_ema <= threshold_multi
-                pred_ema_index = pred_ema_index.nonzero().reshape(-1)
-                targ_index = targ <= threshold_multi
-                targ_index = targ_index.nonzero().reshape(-1)
-                table.add_data(wandb.Image(img[0].numpy()*255), pred_index, pred_ema_index, targ_index)
-            wandb.log({f"predictions_table_threshold_{threshold_multi}": table}, commit=False)
-
+            pass 
+            #TODO cannot log tables for multilabel
+            #table = wandb.Table(columns=["image", "pred", "preds_ema", "target"])
+            #for img, pred, pred_ema, targ in zip(images.to("cpu"), output_regular.to("cpu"), output_ema.to("cpu"), labels.to("cpu")):
+            #    pred_index = pred <= threshold_multi
+            #    pred_index = pred_index.nonzero().reshape(-1)
+            #    pred_ema_index = pred_ema <= threshold_multi
+            #    pred_ema_index = pred_ema_index.nonzero().reshape(-1)
+            #    targ_index = targ <= threshold_multi
+            #    targ_index = targ_index.nonzero().reshape(-1)
+            #    table.add_data(wandb.Image(img[0].numpy()*255), pred_index, pred_ema_index, targ_index)
+            #wandb.log({f"predictions_table_threshold_{threshold_multi}": table}, commit=False)
     mAP_score_regular = mAP(torch.cat(targets).numpy(), torch.cat(preds_regular).numpy())
     mAP_score_ema = mAP(torch.cat(targets).numpy(), torch.cat(preds_ema).numpy())
     print("mAP score regular {:.2f}, mAP score EMA {:.2f}".format(mAP_score_regular, mAP_score_ema))
+    
+    AUC_score_regular = roc_auc_score(torch.cat(targets).numpy(), torch.cat(preds_regular).numpy(), average=None)
+    AUC_score_ema = roc_auc_score(torch.cat(targets).numpy(), torch.cat(preds_ema).numpy(), average=None)
+    
+    AUC_table = wandb.Table(columns=[x for x in range(numb_classes)])
+    AUC_table.add_data(*AUC_score_regular.tolist())
+    AUC_table.add_data(*AUC_score_ema.tolist())
+    wandb.log({"AUC_table": AUC_table}, commit=False)
+    
     return mAP_score_regular, mAP_score_ema
 
 

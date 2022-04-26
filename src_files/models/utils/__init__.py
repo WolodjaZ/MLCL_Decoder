@@ -1,2 +1,2 @@
-from .factory import create_model
-__all__ = ['create_model']
+from .factory import create_model, create_model_base
+__all__ = ['create_model', 'create_model_base']
