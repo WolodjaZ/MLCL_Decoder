@@ -100,7 +100,7 @@ def main():
 
     print('done')
     
-    wandb.login()
+    wandb.login(key="c77809672cac9c98eb589447ff82854fba590ff7")
     # COCO Data loading
     instances_path_val = os.path.join(args.data, 'annotations/instances_val2014.json')
     instances_path_train = os.path.join(args.data, 'annotations/instances_train2014.json')
@@ -527,7 +527,7 @@ def train_multi_label_coco(model, train_loader, val_loader, args):
             highest_mAP = mAP_score
             try:
                 torch.save(model.state_dict(), os.path.join(
-                    'models/', 'model-highest.ckpt'))
+                    *[args.save_dir, f"experiment_{args.run}", "models", "model-highest.ckpt"]))
             except:
                 pass
         print('current_mAP = {:.2f}, highest_mAP = {:.2f}\n'.format(mAP_score, highest_mAP))
