@@ -111,7 +111,6 @@ class MultiSupConLoss(nn.Module):
         )
         
         mask = mask * logits_mask
-        #multi_val = multi_val * mask #TODO
         
         # compute log_prob
         exp_logits = torch.exp(logits) * logits_mask
@@ -122,7 +121,6 @@ class MultiSupConLoss(nn.Module):
         
         # compute mean of log-likelihood over positive
         mean_multi_log_prob_pos = (mask * multi_log_prob).sum(1) / mask.sum(1)
-
         # loss
         loss = - (self.temperature / self.base_temperature) * mean_multi_log_prob_pos
         loss = loss.view(anchor_count, batch_size).mean()
