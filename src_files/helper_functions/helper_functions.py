@@ -1,4 +1,5 @@
 import os
+import csv
 from copy import deepcopy
 import random
 import math
@@ -90,6 +91,79 @@ class AverageMeter(object):
         self.cnt += n
         self.avg = self.sum / self.cnt
         self.ema = self.ema * 0.99 + self.val * 0.01
+
+class MultiLabelCelebA(torch.utils.data.Dataset):
+    def __init__(
+        self, 
+        data_path: str, 
+        split: str = "train",
+        transform = None,
+        target_transform=None
+        ) -> None:
+        self.data_path = data_path
+        self.split = split
+        if not os.path.exists(data_path):
+            raise RuntimeError("Folder with data for CELEBA not exists")
+        
+        keep = []
+        with open(os.path.join(data_path, "list_eval_partition.txt")) as f:
+            lines = f.readlines()
+            for line in lines:
+                filename, numb = line.split()
+                if split == "train" and int(numb) == 0:
+                    keep.append(filename)
+                elif split == "valid" and int(numb) == 1:
+                    keep.append(filename)
+                elif split == "test" and int(numb) == 2:
+                    keep.append(filename)
+                elif split == "all":
+                    keep.append(filename)
+        
+        self.label_names, self.labels = self._load_labels(os.path.join(data_path, "list_attr_celeba.txt"), keep)
+        self.file_names = list(self.labels.keys())
+        self.transform = transform
+        self.target_transform = target_transform
+    
+    def _load_labels(self, path: str, keep = None):
+        row_names = []
+        row_data_dict = {}
+        with open(path, 'r') as file:
+            reader = csv.reader(file)
+            line_numb = 0
+            for row in reader:
+                row_data = row[0]
+                if line_numb == 1:
+                    row_names = row_data.split()
+                elif line_numb > 1:
+                    row_data_numb = row_data.split()
+                    filename = row_data_numb[0]
+                    if keep is not None:
+                        if filename in keep:
+                            row_data_values = [int(x) if int(x) == 1 else int(x)+1 for x in row_data_numb[1:]]
+                            row_data_dict[filename] = row_data_values
+                    else:
+                        row_data_values = [int(x) if int(x) == 1 else int(x)+1 for x in row_data_numb[1:]]
+                        row_data_dict[filename] = row_data_values
+
+                line_numb += 1
+                
+        return row_names, row_data_dict
+    
+    def __len__(self):
+        return len(self.labels)
+    
+    def __getitem__(self, index):
+        image = Image.open(os.path.join(self.data_path, "img_align_celeba", self.file_names[index])).convert('RGB')
+        label = self.labels[self.file_names[index]]
+        target = torch.zeros((3, 40), dtype=torch.long)
+        target[0] = torch.tensor(label, dtype=torch.long)
+        
+        if self.transform is not None:
+            image = self.transform(image)
+        
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        return image, target
 
 
 class CocoDetection(datasets.coco.CocoDetection):

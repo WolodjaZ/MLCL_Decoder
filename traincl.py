@@ -14,7 +14,7 @@ from sklearn.metrics import roc_auc_score
 import torchvision.transforms as transforms
 from torch.optim import lr_scheduler
 from src_files.helper_functions.helper_functions import mAP, CocoDetection, CutoutPIL, ModelEma, \
-    TwoCropTransform, adjust_learning_rate, warmup_learning_rate, add_weight_decay
+    TwoCropTransform, adjust_learning_rate, warmup_learning_rate, add_weight_decay, MultiLabelCelebA
 from src_files.ml_decoder.ml_decoder import add_ml_supcon_head, add_valid_linear_classification, \
     add_ml_decoder_head
 from src_files.models import create_model_base
@@ -27,10 +27,11 @@ def parse_option():
 
     #Defult params
     parser.add_argument('--data', type=str, default='/home/MSCOCO_2014/')
+    parser.add_argument('--data-name', type=str, default='COCO')
     parser.add_argument('--model-name', default='tresnet_l')
     parser.add_argument('--model-path', default='https://miil-public-eu.oss-eu-central-1.aliyuncs.com/model-zoo/ML_Decoder/tresnet_l_pretrain_ml_decoder.pth', type=str)
     parser.add_argument('--num-classes', default=80)
-    parser.add_argument('-j', '--workers', default=8, type=int, metavar='N',
+    parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                         help='number of data loading workers')
     parser.add_argument('--image-size', default=448, type=int,
                         metavar='N', help='input image size (default: 448)')
@@ -101,49 +102,95 @@ def main():
     print('done')
     
     wandb.login()
-    # COCO Data loading
-    instances_path_val = os.path.join(args.data, 'annotations/instances_val2014.json')
-    instances_path_train = os.path.join(args.data, 'annotations/instances_train2014.json')
-    data_path_val = f'{args.data}/val2014'  # args.data
-    data_path_train = f'{args.data}/train2014'  # args.data
-    train_backbone_dataset = CocoDetection(
-        data_path_train,
-        instances_path_train,
-        TwoCropTransform(transforms.Compose([
-                        transforms.Resize((args.image_size, args.image_size)),
-                        transforms.RandomHorizontalFlip(),
-                        transforms.RandomApply([
-                            transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)
-                        ], p=0.8),
-                        transforms.RandomGrayscale(p=0.2),
-                        transforms.ToTensor()
-                        ]))
-    )
-    val_backbone_dataset = CocoDetection(
-        data_path_val,
-        instances_path_val,
-        transforms.Compose([
-                        transforms.Resize((args.image_size, args.image_size)),
-                        transforms.RandomHorizontalFlip(),
-                        transforms.ToTensor()
-                        ])
-    )
-    val_dataset = CocoDetection(data_path_val,
-                                instances_path_val,
-                                transforms.Compose([
-                                    transforms.Resize((args.image_size, args.image_size)),
-                                    transforms.ToTensor(),
-                                    # normalize, # no need, toTensor does normalization
-                                ]))
-    train_dataset = CocoDetection(data_path_train,
-                                  instances_path_train,
-                                  transforms.Compose([
-                                      transforms.Resize((args.image_size, args.image_size)),
-                                      CutoutPIL(cutout_factor=0.5),
-                                      RandAugment(),
-                                      transforms.ToTensor(),
-                                      # normalize,
-                                  ]))
+    if args.data_name == "COCO":
+        # COCO Data loading
+        instances_path_val = os.path.join(args.data, 'annotations/instances_val2014.json')
+        instances_path_train = os.path.join(args.data, 'annotations/instances_train2014.json')
+        data_path_val = f'{args.data}/val2014'  # args.data
+        data_path_train = f'{args.data}/train2014'  # args.data
+        train_backbone_dataset = CocoDetection(
+            data_path_train,
+            instances_path_train,
+            TwoCropTransform(transforms.Compose([
+                            transforms.Resize((args.image_size, args.image_size)),
+                            transforms.RandomHorizontalFlip(),
+                            transforms.RandomApply([
+                                transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)
+                            ], p=0.8),
+                            transforms.RandomGrayscale(p=0.2),
+                            transforms.ToTensor()
+                            ]))
+        )
+        val_backbone_dataset = CocoDetection(
+            data_path_val,
+            instances_path_val,
+            transforms.Compose([
+                            transforms.Resize((args.image_size, args.image_size)),
+                            transforms.RandomHorizontalFlip(),
+                            transforms.ToTensor()
+                            ])
+        )
+        val_dataset = CocoDetection(data_path_val,
+                                    instances_path_val,
+                                    transforms.Compose([
+                                        transforms.Resize((args.image_size, args.image_size)),
+                                        transforms.ToTensor(),
+                                        # normalize, # no need, toTensor does normalization
+                                    ]))
+        train_dataset = CocoDetection(data_path_train,
+                                    instances_path_train,
+                                    transforms.Compose([
+                                        transforms.Resize((args.image_size, args.image_size)),
+                                        CutoutPIL(cutout_factor=0.5),
+                                        RandAugment(),
+                                        transforms.ToTensor(),
+                                        # normalize,
+                                    ]))
+    elif args.data_name == "CELEBA":
+        train_backbone_dataset = MultiLabelCelebA(
+            args.data,
+            split="train",
+            transform=TwoCropTransform(transforms.Compose([
+                            transforms.RandomResizedCrop(size=args.image_size),
+                            transforms.RandomHorizontalFlip(),
+                            transforms.RandomApply([
+                                transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)
+                            ], p=0.8),
+                            transforms.RandomGrayscale(p=0.2),
+                            transforms.ToTensor(),
+                            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                            ]))
+        )
+        val_backbone_dataset = MultiLabelCelebA(
+            args.data,
+            split="valid",
+            transform=TwoCropTransform(transforms.Compose([
+                            transforms.Resize(size=(args.image_size, args.image_size)),
+                            transforms.RandomHorizontalFlip(),
+                            transforms.ToTensor(),
+                            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                            ]))
+        )
+        val_dataset = MultiLabelCelebA(
+            args.data,
+            split="valid",
+            transform=transforms.Compose([
+                                        transforms.Resize((args.image_size, args.image_size)),
+                                        transforms.ToTensor(),
+                                        # normalize, # no need, toTensor does normalization
+                                    ])
+        )
+        train_dataset = MultiLabelCelebA(
+            args.data,
+            split="train",
+            transform=transforms.Compose([
+                                        transforms.Resize((args.image_size, args.image_size)),
+                                        CutoutPIL(cutout_factor=0.5),
+                                        RandAugment(),
+                                        transforms.ToTensor(),
+                                        # normalize, # no need, toTensor does normalization
+                                    ])
+        )
     
     print("Contrastive len(val_dataset)): ", len(val_backbone_dataset))
     print("Contrastive len(train_dataset)): ", len(train_backbone_dataset))
@@ -234,7 +281,7 @@ def train_multi_label_coco_backbone(model, train_loader, val_loader,  args):
             "c_treshold": args.c_treshold
       })
     wandb.watch(model, log="all")
-    
+    scaler = GradScaler()
     for epoch in range(1, args.epochs_con + 1):
         model.train()
         loss_total = 0
@@ -251,7 +298,9 @@ def train_multi_label_coco_backbone(model, train_loader, val_loader,  args):
             warmup_learning_rate(args, epoch, idx, len(train_loader), optimizer)
 
             # compute loss
-            features = model(images)
+            with autocast():  # mixed precision
+                features = model(images).float()
+                
             f1, f2 = torch.split(features, [bsz, bsz], dim=0)
             f1 = torch.nn.functional.normalize(f1, dim=1)
             f2 = torch.nn.functional.normalize(f2, dim=1)
@@ -268,10 +317,10 @@ def train_multi_label_coco_backbone(model, train_loader, val_loader,  args):
 
             # SGD
             loss_total += loss.item()
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
+            model.zero_grad()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             ema.update(model)
 
             # print info
@@ -457,7 +506,6 @@ def train_multi_label_coco(model, train_loader, val_loader, args):
     steps_per_epoch = len(train_loader)
     scheduler = lr_scheduler.OneCycleLR(optimizer, max_lr=args.learning_rate, steps_per_epoch=steps_per_epoch, epochs=args.epochs,
                                         pct_start=0.2)
-    scaler = GradScaler()
 
     wandb.init(
         project="test-project", 
@@ -476,31 +524,26 @@ def train_multi_label_coco(model, train_loader, val_loader, args):
             "freeze": args.freeze
       })
     wandb.watch(model, log="all")
-
+    scaler = GradScaler()
     highest_mAP = 0
     for epoch in range(args.epochs):
         model.train()
         loss_total = 0
         for idx, (images, labels) in enumerate(train_loader):
-            images = images.cuda()
-            labels = labels.cuda()
+            if torch.cuda.is_available():
+                images = images.cuda(non_blocking=True)
+                labels = labels.cuda(non_blocking=True)
             labels = labels.max(dim=1)[0]
             with autocast():  # mixed precision
                 output = model(images).float()  # sigmoid will be done in loss !
             loss = criterion(output, labels)
             loss_total += loss.item()
             model.zero_grad()
-
             scaler.scale(loss).backward()
-            # loss.backward()
-
             scaler.step(optimizer)
             scaler.update()
-            # optimizer.step()
-
-            scheduler.step()
-
             ema.update(model)
+            
             # print info
             if idx % 100 == 0:
                 print(f'Train: Epoch [{epoch}/{args.epochs}], Step [{idx}/{len(train_loader)}], LR {scheduler.get_last_lr()[0]:.1e}, Loss: {loss.item():.1f}')
