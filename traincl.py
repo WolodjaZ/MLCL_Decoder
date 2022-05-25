@@ -30,7 +30,7 @@ def parse_option():
     parser.add_argument('--data-name', type=str, default='COCO')
     parser.add_argument('--model-name', default='tresnet_l')
     parser.add_argument('--model-path', default='https://miil-public-eu.oss-eu-central-1.aliyuncs.com/model-zoo/ML_Decoder/tresnet_l_pretrain_ml_decoder.pth', type=str)
-    parser.add_argument('--num-classes', default=80)
+    parser.add_argument('--num-classes', type=int, default=80)
     parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                         help='number of data loading workers')
     parser.add_argument('--image-size', default=448, type=int,
@@ -209,7 +209,7 @@ def main():
         num_workers=args.workers, pin_memory=True, sampler=None)
 
     val_backbone_loader = torch.utils.data.DataLoader(
-        val_backbone_dataset, batch_size=args.batch_size_con, shuffle=None,
+        val_backbone_dataset, batch_size=args.batch_size, shuffle=None,
         num_workers=args.workers, pin_memory=False, sampler=None)
     
     train_loader = torch.utils.data.DataLoader(
@@ -251,7 +251,7 @@ def train_multi_label_coco_backbone(model, train_loader, val_loader,  args):
         args.warm = True
     if args.warm:
         args.warmup_from = 0.01
-        args.warm_epochs = 10
+        args.warm_epochs = 8
         if args.cosine:
             eta_min = args.learning_rate_con * (args.lr_decay_rate ** 3)
             args.warmup_to = eta_min + (args.learning_rate_con - eta_min) * (
@@ -336,15 +336,15 @@ def train_multi_label_coco_backbone(model, train_loader, val_loader,  args):
         
         #log
         wandb.log({
-            "loss_total": loss_total,
-            "loss_average": (loss_total / len(train_loader)),
+            "loss": (loss_total / len(train_loader)),
+            "learning_rate": optimizer.param_groups[0]['lr'],
             "UMAP_vis": fig,
             "UMAP_vis_ema": fig_ema
         })
     
     if args.linear:
-        loss_linear, ema = train_contrastive_linear(model, train_loader,  args)
-        mAP_regular, mAP_ema = validate_contrastive_linear(model, ema, val_loader,  args)
+        loss_linear, ema = train_contrastive_linear(model, train_loader, args)
+        mAP_regular, mAP_ema = validate_contrastive_linear(model, ema, val_loader, args)
         wandb.run.summary["loss_linear"] = loss_linear
         wandb.run.summary["mAP_score"] = mAP_regular
         wandb.run.summary["mAP_score_ema"] = mAP_ema
@@ -480,6 +480,7 @@ def validate_contrastive_linear(model, ema_model, val_loader, args):
     labels = []
     with torch.no_grad():
         for idx, (images, label) in enumerate(val_loader):
+            images = images[1]
             if torch.cuda.is_available():
                 images = images.cuda(non_blocking=True)
 
