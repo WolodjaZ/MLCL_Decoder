@@ -221,18 +221,20 @@ def main():
         num_workers=args.workers, pin_memory=False)
 
     # Actuall Training
-    print("Training backbone")
-    model = add_ml_supcon_head(model, feat_dim=args.feat_dim_con)
-    train_multi_label_coco_backbone(model, train_backbone_loader, val_backbone_loader,  args)
-    if args.freeze:
-        for name, p in model.named_parameters():
-            if "body" in name or "global_pool" in name:
-                p.requires_grad = False
+    if args.epochs_con != 0:
+        print("Training backbone")
+        model = add_ml_supcon_head(model, feat_dim=args.feat_dim_con)
+        train_multi_label_coco_backbone(model, train_backbone_loader, val_backbone_loader,  args)
+        if args.freeze:
+            for name, p in model.named_parameters():
+                if "body" in name or "global_pool" in name:
+                    p.requires_grad = False
 
-    print("Training head")
-    model = add_ml_decoder_head(model,num_classes=args.num_classes,num_of_groups=args.num_of_groups,
+    if args.epochs != 0:
+        print("Training head")
+        model = add_ml_decoder_head(model,num_classes=args.num_classes,num_of_groups=args.num_of_groups,
                                 decoder_embedding=args.decoder_embedding, zsl=args.zsl)
-    train_multi_label_coco(model, train_loader, val_loader,  args)
+        train_multi_label_coco(model, train_loader, val_loader,  args)
 
 
 def train_multi_label_coco_backbone(model, train_loader, val_loader,  args):
