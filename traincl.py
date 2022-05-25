@@ -14,7 +14,8 @@ from sklearn.metrics import roc_auc_score
 import torchvision.transforms as transforms
 from torch.optim import lr_scheduler
 from src_files.helper_functions.helper_functions import mAP, CocoDetection, CutoutPIL, ModelEma, \
-    TwoCropTransform, adjust_learning_rate, warmup_learning_rate, add_weight_decay, MultiLabelCelebA
+    TwoCropTransform, adjust_learning_rate, warmup_learning_rate, add_weight_decay, MultiLabelCelebA, \
+    VOCDataset, OpenImagesDataset
 from src_files.ml_decoder.ml_decoder import add_ml_supcon_head, add_valid_linear_classification, \
     add_ml_decoder_head
 from src_files.models import create_model_base
@@ -146,6 +147,128 @@ def main():
                                         transforms.ToTensor(),
                                         # normalize,
                                     ]))
+    elif args.data_name == "COCOR":
+        # COCO Data loading
+        instances_path_val = os.path.join(args.data, 'annotations/instances_val2014.json')
+        instances_path_train = os.path.join(args.data, 'annotations/instances_train2014.json')
+        data_path_val = f'{args.data}/val2014'  # args.data
+        data_path_train = f'{args.data}/train2014'  # args.data
+        train_backbone_dataset = CocoDetection(
+            data_path_train,
+            instances_path_train,
+            TwoCropTransform(transforms.Compose([
+                            transforms.RandomHorizontalFlip(),
+                            transforms.RandomApply([
+                                transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)
+                            ], p=0.8),
+                            transforms.RandomGrayscale(p=0.2),
+                            transforms.ToTensor()
+                            ])),
+            boxcrop=args.image_size
+        )
+        val_backbone_dataset = CocoDetection(
+            data_path_val,
+            instances_path_val,
+            transforms.Compose([
+                            transforms.Resize((args.image_size, args.image_size)),
+                            transforms.RandomHorizontalFlip(),
+                            transforms.ToTensor()
+                            ])
+        )
+        val_dataset = CocoDetection(data_path_val,
+                                    instances_path_val,
+                                    transforms.Compose([
+                                        transforms.Resize((args.image_size, args.image_size)),
+                                        transforms.ToTensor(),
+                                        # normalize, # no need, toTensor does normalization
+                                    ]))
+        train_dataset = CocoDetection(data_path_train,
+                                    instances_path_train,
+                                    transforms.Compose([
+                                        transforms.Resize((args.image_size, args.image_size)),
+                                        CutoutPIL(cutout_factor=0.5),
+                                        RandAugment(),
+                                        transforms.ToTensor(),
+                                        # normalize,
+                                    ]))
+    elif args.data_name == "VOC":
+        train_backbone_dataset = VOCDataset(
+            args.data,
+            TwoCropTransform(transforms.Compose([
+                            transforms.Resize((args.image_size, args.image_size)),
+                            transforms.RandomHorizontalFlip(),
+                            transforms.RandomApply([
+                                transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)
+                            ], p=0.8),
+                            transforms.RandomGrayscale(p=0.2),
+                            transforms.ToTensor()
+                            ])),
+            val=False
+        )
+        val_backbone_dataset = VOCDataset(
+            args.data,
+            transforms.Compose([
+                            transforms.Resize((args.image_size, args.image_size)),
+                            transforms.RandomHorizontalFlip(),
+                            transforms.ToTensor()
+                            ]),
+            val=True
+        )
+        val_dataset = VOCDataset(args.data,
+                                    transforms.Compose([
+                                        transforms.Resize((args.image_size, args.image_size)),
+                                        transforms.ToTensor(),
+                                        # normalize, # no need, toTensor does normalization
+                                    ]),
+                                    val=True)
+        train_dataset = VOCDataset(args.data,
+                                    transforms.Compose([
+                                        transforms.Resize((args.image_size, args.image_size)),
+                                        CutoutPIL(cutout_factor=0.5),
+                                        RandAugment(),
+                                        transforms.ToTensor(),
+                                        # normalize,
+                                    ]),
+                                    val=False)
+    elif args.data_name == "VOCR":
+        train_backbone_dataset = VOCDataset(
+            args.data,
+            TwoCropTransform(transforms.Compose([
+                            transforms.RandomHorizontalFlip(),
+                            transforms.RandomApply([
+                                transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)
+                            ], p=0.8),
+                            transforms.RandomGrayscale(p=0.2),
+                            transforms.ToTensor()
+                            ])),
+            val=False,
+            boxcrop=args.image_size
+        )
+        val_backbone_dataset = VOCDataset(
+            args.data,
+            transforms.Compose([
+                            transforms.Resize((args.image_size, args.image_size)),
+                            transforms.RandomHorizontalFlip(),
+                            transforms.ToTensor()
+                            ]),
+            val=True
+        )
+        val_dataset = VOCDataset(args.data,
+                                    transforms.Compose([
+                                        transforms.Resize((args.image_size, args.image_size)),
+                                        transforms.ToTensor(),
+                                        # normalize, # no need, toTensor does normalization
+                                    ]),
+                                    val=True)
+        train_dataset = VOCDataset(args.data,
+                                    transforms.Compose([
+                                        transforms.Resize((args.image_size, args.image_size)),
+                                        CutoutPIL(cutout_factor=0.5),
+                                        RandAugment(),
+                                        transforms.ToTensor(),
+                                        # normalize,
+                                    ]),
+                                    val=False)
     elif args.data_name == "CELEBA":
         train_backbone_dataset = MultiLabelCelebA(
             args.data,
@@ -191,7 +314,52 @@ def main():
                                         # normalize, # no need, toTensor does normalization
                                     ])
         )
-    
+    elif args.data_name == "CELEBAO":
+        train_backbone_dataset = MultiLabelCelebA(
+            args.data,
+            split="train",
+            transform=TwoCropTransform(transforms.Compose([
+                            transforms.Resize((args.image_size, args.image_size)),
+                            transforms.RandomHorizontalFlip(),
+                            transforms.RandomApply([
+                                transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)
+                            ], p=0.8),
+                            transforms.RandomGrayscale(p=0.2),
+                            transforms.ToTensor(),
+                            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                            ]))
+        )
+        val_backbone_dataset = MultiLabelCelebA(
+            args.data,
+            split="valid",
+            transform=TwoCropTransform(transforms.Compose([
+                            transforms.Resize(size=(args.image_size, args.image_size)),
+                            transforms.RandomHorizontalFlip(),
+                            transforms.ToTensor(),
+                            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                            ]))
+        )
+        val_dataset = MultiLabelCelebA(
+            args.data,
+            split="valid",
+            transform=transforms.Compose([
+                                        transforms.Resize((args.image_size, args.image_size)),
+                                        transforms.ToTensor(),
+                                        # normalize, # no need, toTensor does normalization
+                                    ])
+        )
+        train_dataset = MultiLabelCelebA(
+            args.data,
+            split="train",
+            transform=transforms.Compose([
+                                        transforms.Resize((args.image_size, args.image_size)),
+                                        CutoutPIL(cutout_factor=0.5),
+                                        RandAugment(),
+                                        transforms.ToTensor(),
+                                        # normalize, # no need, toTensor does normalization
+                                    ])
+        )
+        
     print("Contrastive len(val_dataset)): ", len(val_backbone_dataset))
     print("Contrastive len(train_dataset)): ", len(train_backbone_dataset))
     print("ML_decode len(val_dataset)): ", len(val_dataset))
