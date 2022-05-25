@@ -6,9 +6,7 @@ import umap
 import math
 import wandb
 import torch
-import torch.nn.parallel
 import torch.optim
-import torch.distributed as dist
 import plotly.graph_objects as go
 import torch.utils.data.distributed
 from sklearn.metrics import roc_auc_score
@@ -16,7 +14,7 @@ import torchvision.transforms as transforms
 from torch.optim import lr_scheduler
 from src_files.helper_functions.helper_functions import mAP, CocoDetection, CutoutPIL, ModelEma, \
     TwoCropTransform, adjust_learning_rate, warmup_learning_rate, add_weight_decay, MultiLabelCelebA, \
-    VOCDataset, OpenImagesDataset
+    VOCDataset
 from src_files.ml_decoder.ml_decoder import add_ml_supcon_head, add_valid_linear_classification, \
     add_ml_decoder_head
 from src_files.models import create_model_base
@@ -49,20 +47,6 @@ def parse_option():
                         metavar='N', help='Visualize in 3d')
     parser.add_argument('--linear', default=False, type=bool,
                         metavar='N', help='Do linear validation')
-    
-    # Distributed learning
-    parser.add_argument("--dist-url", default="env://", type=str, help="""url used to set up distributed
-                    training; see https://pytorch.org/docs/stable/distributed.html""")
-    parser.add_argument('--dist-backend', default='nccl', type=str, 
-                        help='distributed backend')
-    parser.add_argument("--world-size", default=-1, type=int, help="""
-                        number of processes: it is set automatically and
-                        should not be passed as argument""")
-    parser.add_argument("--rank", default=0, type=int, help="""rank of this process:
-                        it is set automatically and should not be passed as argument""")
-    parser.add_argument("--local-rank", default=0, type=int,
-                        help="this argument is not used and should be ignored")
-    parser.add_argument('--gpu', default=None, type=int)
 
     # ML-Decoder
     parser.add_argument('--batch-size', default=56, type=int,
@@ -110,22 +94,6 @@ def parse_option():
 
 def main():
     args = parse_option().parse_args()
-    
-    # Distributed settings
-    if "WORLD_SIZE" in os.environ:
-        args.world_size = int(os.environ["WORLD_SIZE"])
-    args.distributed = args.world_size > 1
-    ngpus_per_node = torch.cuda.device_count()
-    
-    if args.distributed:
-        if args.local_rank != -1: # for torch.distributed.launch
-            args.rank = args.local_rank
-            args.gpu = args.local_rank
-        elif 'SLURM_PROCID' in os.environ: # for slurm scheduler
-            args.rank = int(os.environ['SLURM_PROCID'])
-            args.gpu = args.rank % torch.cuda.device_count()
-        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                world_size=args.world_size, rank=args.rank)
 
     # Setup model
     print('creating model {}...'.format(args.model_name))
@@ -133,8 +101,7 @@ def main():
 
     print('done')
     
-    if args.rank == 0:
-        wandb.login(key="c77809672cac9c98eb589447ff82854fba590ff7")
+    wandb.login(key="c77809672cac9c98eb589447ff82854fba590ff7")
     if args.data_name == "COCO":
         # COCO Data loading
         instances_path_val = os.path.join(args.data, 'annotations/instances_val2014.json')
@@ -404,44 +371,28 @@ def main():
     os.makedirs(os.path.join(experiemnt_dir, "models"), exist_ok=False)
 
     # Pytorch Data loader 
-    train_backbone_sampler = torch.utils.data.distributed.DistributedSampler(train_backbone_dataset, shuffle=True)
     train_backbone_loader = torch.utils.data.DataLoader(
-        train_backbone_dataset, batch_size=args.batch_size_con, shuffle=(train_backbone_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=train_backbone_sampler, drop_last=True)
+        train_backbone_dataset, batch_size=args.batch_size_con, shuffle=True,
+        num_workers=args.workers, pin_memory=True, sampler=None)
 
     val_backbone_loader = torch.utils.data.DataLoader(
         val_backbone_dataset, batch_size=args.batch_size, shuffle=None,
         num_workers=args.workers, pin_memory=False, sampler=None)
     
-    train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, shuffle=True)
     train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size,shuffle=(train_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
+        train_dataset, batch_size=args.batch_size, shuffle=True,
+        num_workers=args.workers, pin_memory=True)
 
     val_loader = torch.utils.data.DataLoader(
         val_dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=False)
 
     # Actuall Training
-    torch.backends.cudnn.benchmark = True
     if args.epochs_con != 0:
         print("Training backbone")
         model = add_ml_supcon_head(model, feat_dim=args.feat_dim_con)
-        if args.distributed:
-            # For multiprocessing distributed, DistributedDataParallel constructor
-            # should always set the single device scope, otherwise,
-            # DistributedDataParallel will use all available devices.
-            if args.gpu is not None:
-                torch.cuda.set_device(args.gpu)
-                model.cuda(args.gpu)
-                model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-                model_without_ddp = model.module
-            else:
-                model.cuda()
-                model = torch.nn.parallel.DistributedDataParallel(model)
-                model_without_ddp = model.module
-        else:
-            raise NotImplementedError("Only DistributedDataParallel is supported.")
+        if torch.cuda.device_count() > 1:
+            model = torch.nn.DataParallel(model)
         train_multi_label_coco_backbone(model, train_backbone_loader, val_backbone_loader,  args)
         if args.freeze:
             for name, p in model.named_parameters():
@@ -452,22 +403,8 @@ def main():
         print("Training head")
         model = add_ml_decoder_head(model,num_classes=args.num_classes,num_of_groups=args.num_of_groups,
                                 decoder_embedding=args.decoder_embedding, zsl=args.zsl)
-        if args.distributed:
-            # For multiprocessing distributed, DistributedDataParallel constructor
-            # should always set the single device scope, otherwise,
-            # DistributedDataParallel will use all available devices.
-            if args.gpu is not None:
-                torch.cuda.set_device(args.gpu)
-                model.cuda(args.gpu)
-                model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-                model_without_ddp = model.module
-            else:
-                model.cuda()
-                model = torch.nn.parallel.DistributedDataParallel(model)
-                model_without_ddp = model.module
-        else:
-            raise NotImplementedError("Only DistributedDataParallel is supported.")
-        
+        if torch.cuda.device_count() > 1:
+            model = torch.nn.DataParallel(model)
         train_multi_label_coco(model, train_loader, val_loader,  args)
 
 
@@ -497,31 +434,28 @@ def train_multi_label_coco_backbone(model, train_loader, val_loader,  args):
     
     criterion = MultiSupConLoss(temperature=args.temp, c_treshold=args.c_treshold)
     optimizer = torch.optim.SGD(model.parameters(), lr=args.learning_rate_con, momentum=args.momentum, weight_decay=args.weight_decay_con)
-    if args.local_rank == 0:
-        wandb.init(
-            project="test-project", 
-            entity="pwr-multisupcontr",
-            name=f"backbone_training_{args.run}", 
-            config={
-                "batch-size": args.batch_size_con,
-                "epochs": args.epochs_con,
-                "learning_rate": args.learning_rate_con,
-                "lr_decay_epochs": args.lr_decay_epochs,
-                "lr_decay_rate": args.lr_decay_rate,
-                "weight_decay": args.weight_decay_con,
-                "momentum": args.momentum,
-                "method": args.method,
-                "temp": args.temp,
-                "cosine": args.cosine,
-                "warm": args.warm,
-                "feat-dim-con": args.feat_dim_con,
-                "c_treshold": args.c_treshold
-        })
-        wandb.watch(model, log="all")
+    wandb.init(
+        project="test-project", 
+        entity="pwr-multisupcontr",
+        name=f"backbone_training_{args.run}", 
+        config={
+            "batch-size": args.batch_size_con,
+            "epochs": args.epochs_con,
+            "learning_rate": args.learning_rate_con,
+            "lr_decay_epochs": args.lr_decay_epochs,
+            "lr_decay_rate": args.lr_decay_rate,
+            "weight_decay": args.weight_decay_con,
+            "momentum": args.momentum,
+            "method": args.method,
+            "temp": args.temp,
+            "cosine": args.cosine,
+            "warm": args.warm,
+            "feat-dim-con": args.feat_dim_con,
+            "c_treshold": args.c_treshold
+      })
+    wandb.watch(model, log="all")
     scaler = GradScaler()
     for epoch in range(1, args.epochs_con + 1):
-        if args.distributed: 
-            train_loader.sampler.set_epoch(epoch)
         model.train()
         loss_total = 0
         adjust_learning_rate(args, optimizer, epoch)
@@ -563,35 +497,31 @@ def train_multi_label_coco_backbone(model, train_loader, val_loader,  args):
             ema.update(model)
 
             # print info
-            if args.rank == 0 and idx % 100 == 0:
+            if idx % 100 == 0:
                 print(f'Train: Epoch [{epoch-1}/{args.epochs_con}], Step [{idx}/{len(train_loader)}] loss: {loss.item():.3f}')
         try:
-            if args.rank == 0:
-                torch.save(model.state_dict(), os.path.join(
-                    *[args.save_dir, f"experiment_{args.run}", "models", "model-backbone-{}-{}.ckpt".format(epoch + 1, idx + 1)]))
+            torch.save(model.state_dict(), os.path.join(
+                *[args.save_dir, f"experiment_{args.run}", "models", "model-backbone-{}-{}.ckpt".format(epoch + 1, idx + 1)]))
         except:
             pass
-            
-        if args.rank == 0:
-            fig, fig_ema = validate_contrastive(model, ema, train_loader, args.num_classes, args.vis_3d)
-        
-        if args.rank == 0:
-            #log
-            wandb.log({
-                "loss": (loss_total / len(train_loader)),
-                "learning_rate": optimizer.param_groups[0]['lr'],
-                "UMAP_vis": fig,
-                "UMAP_vis_ema": fig_ema
-            })
     
-    if args.rank == 0:
-        if args.linear:
-            loss_linear, ema = train_contrastive_linear(model, train_loader, args)
-            mAP_regular, mAP_ema = validate_contrastive_linear(model, ema, val_loader, args)
-            wandb.run.summary["loss_linear"] = loss_linear
-            wandb.run.summary["mAP_score"] = mAP_regular
-            wandb.run.summary["mAP_score_ema"] = mAP_ema
-        wandb.finish()
+        fig, fig_ema = validate_contrastive(model, ema, train_loader, args.num_classes, args.vis_3d)
+        
+        #log
+        wandb.log({
+            "loss": (loss_total / len(train_loader)),
+            "learning_rate": optimizer.param_groups[0]['lr'],
+            "UMAP_vis": fig,
+            "UMAP_vis_ema": fig_ema
+        })
+    
+    if args.linear:
+        loss_linear, ema = train_contrastive_linear(model, train_loader, args)
+        mAP_regular, mAP_ema = validate_contrastive_linear(model, ema, val_loader, args)
+        wandb.run.summary["loss_linear"] = loss_linear
+        wandb.run.summary["mAP_score"] = mAP_regular
+        wandb.run.summary["mAP_score_ema"] = mAP_ema
+    wandb.finish()
 
 def validate_contrastive(model, ema_model, train_loader, numb_classes, vis_3d=True):
     model.eval()
@@ -675,6 +605,8 @@ def validate_contrastive(model, ema_model, train_loader, numb_classes, vis_3d=Tr
 
 def train_contrastive_linear(model, train_loader, args):
     model = add_valid_linear_classification(model, args.num_classes)
+    if torch.cuda.device_count() > 1:
+        model = torch.nn.DataParallel(model)
     if torch.cuda.is_available():
         model = model.cuda()
     
@@ -750,28 +682,27 @@ def train_multi_label_coco(model, train_loader, val_loader, args):
     steps_per_epoch = len(train_loader)
     scheduler = lr_scheduler.OneCycleLR(optimizer, max_lr=args.learning_rate, steps_per_epoch=steps_per_epoch, epochs=args.epochs,
                                         pct_start=0.2)
-    if args.rank == 0:
-        wandb.init(
-            project="test-project", 
-            entity="pwr-multisupcontr",
-            name=f"ML_Decode_training_{args.run}", 
-            config={
-                "batch-size": args.batch_size,
-                "epochs": args.epochs,
-                "learning_rate": args.learning_rate,
-                "weight_decay": args.weight_decay,
-                "use-ml-decoder": args.use_ml_decoder,
-                "num-of-groups": args.num_of_groups,
-                "decoder-embedding": args.decoder_embedding,
-                "zsl": args.zsl,
-                "threshold_multi": args.threshold_multi,
-                "freeze": args.freeze
-        })
-        wandb.watch(model, log="all")
+
+    wandb.init(
+        project="test-project", 
+        entity="pwr-multisupcontr",
+        name=f"ML_Decode_training_{args.run}", 
+        config={
+            "batch-size": args.batch_size,
+            "epochs": args.epochs,
+            "learning_rate": args.learning_rate,
+            "weight_decay": args.weight_decay,
+            "use-ml-decoder": args.use_ml_decoder,
+            "num-of-groups": args.num_of_groups,
+            "decoder-embedding": args.decoder_embedding,
+            "zsl": args.zsl,
+            "threshold_multi": args.threshold_multi,
+            "freeze": args.freeze
+      })
+    wandb.watch(model, log="all")
     scaler = GradScaler()
     highest_mAP = 0
     for epoch in range(args.epochs):
-        train_loader.sampler.set_epoch(epoch)
         model.train()
         loss_total = 0
         for idx, (images, labels) in enumerate(train_loader):
@@ -790,42 +721,38 @@ def train_multi_label_coco(model, train_loader, val_loader, args):
             ema.update(model)
             
             # print info
-            if args.rank == 0 and idx % 100 == 0:
+            if idx % 100 == 0:
                 print(f'Train: Epoch [{epoch}/{args.epochs}], Step [{idx}/{len(train_loader)}], LR {scheduler.get_last_lr()[0]:.1e}, Loss: {loss.item():.1f}')
             
         try:
-            if args.rank == 0:
-                torch.save(model.state_dict(), os.path.join(
-                    *[args.save_dir, f"experiment_{args.run}", "models", "model-{}-{}.ckpt".format(epoch + 1, idx + 1)]))
+            torch.save(model.state_dict(), os.path.join(
+                *[args.save_dir, f"experiment_{args.run}", "models", "model-{}-{}.ckpt".format(epoch + 1, idx + 1)]))
         except:
             pass
+
+        model.eval()
+        mAP_score_regular, mAP_score_ema = validate_multi(val_loader, model, ema, args.num_classes, args.batch_imgs, args.threshold_multi)
+        mAP_score = max(mAP_score_regular, mAP_score_ema)
         
-        if args.rank == 0:
-            model.eval()
-            mAP_score_regular, mAP_score_ema = validate_multi(val_loader, model, ema, args.num_classes, args.batch_imgs, args.threshold_multi)
-            mAP_score = max(mAP_score_regular, mAP_score_ema)
+        #log
+        wandb.log({
+            "loss_total": loss_total,
+            "loss_average": (loss_total / len(train_loader)),
+            "mAP_score": mAP_score_regular,
+            "mAP_score_ema": mAP_score_ema
+        })
         
-        if args.rank == 0:
-            #log
-            wandb.log({
-                "loss_total": loss_total,
-                "loss_average": (loss_total / len(train_loader)),
-                "mAP_score": mAP_score_regular,
-                "mAP_score_ema": mAP_score_ema
-            })
-        
-            if mAP_score > highest_mAP:
-                highest_mAP = mAP_score
-                try:
-                    torch.save(model.state_dict(), os.path.join(
-                        *[args.save_dir, f"experiment_{args.run}", "models", "model-highest.ckpt"]))
-                except:
-                    pass
-            print('current_mAP = {:.2f}, highest_mAP = {:.2f}\n'.format(mAP_score, highest_mAP))
+        if mAP_score > highest_mAP:
+            highest_mAP = mAP_score
+            try:
+                torch.save(model.state_dict(), os.path.join(
+                    *[args.save_dir, f"experiment_{args.run}", "models", "model-highest.ckpt"]))
+            except:
+                pass
+        print('current_mAP = {:.2f}, highest_mAP = {:.2f}\n'.format(mAP_score, highest_mAP))
     
-    if args.rank == 0:
-        wandb.run.summary["highest_mAP"] = highest_mAP
-        wandb.finish()
+    wandb.run.summary["highest_mAP"] = highest_mAP
+    wandb.finish()
 
 def validate_multi(val_loader, model, ema_model, numb_classes, batch_idx=0, threshold_multi=0.4):
     print("starting validation")
