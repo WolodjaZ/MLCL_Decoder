@@ -15,7 +15,7 @@ import torchvision.transforms as transforms
 from torch.optim import lr_scheduler
 from src_files.helper_functions.helper_functions import mAP, CocoDetection, CutoutPIL, ModelEma, \
     TwoCropTransform, adjust_learning_rate, warmup_learning_rate, add_weight_decay, MultiLabelCelebA, \
-    VOCDataset, OpenImagesDataset
+    VOCDataset
 from src_files.ml_decoder.ml_decoder import add_ml_supcon_head, add_valid_linear_classification, \
     add_ml_decoder_head
 from src_files.models import create_model_base
