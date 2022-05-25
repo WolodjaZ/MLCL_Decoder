@@ -808,8 +808,7 @@ def train_multi_label_coco(model, train_loader, val_loader, args):
         if args.rank == 0:
             #log
             wandb.log({
-                "loss_total": loss_total,
-                "loss_average": (loss_total / len(train_loader)),
+                "loss": (loss_total / len(train_loader)),
                 "mAP_score": mAP_score_regular,
                 "mAP_score_ema": mAP_score_ema
             })
